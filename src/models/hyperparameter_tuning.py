@@ -4,7 +4,6 @@ XGBoost hyperparameter tuning using RandomizedSearchCV
 """
 
 from sklearn.model_selection import RandomizedSearchCV, StratifiedKFold
-from xgboost import XGBClassifier
 
 
 def tune_xgboost(pipeline, X_train, y_train):
@@ -19,12 +18,12 @@ def tune_xgboost(pipeline, X_train, y_train):
         "classifier__min_child_weight": [1, 3, 5]
     }
 
-    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
 
     search = RandomizedSearchCV(
         pipeline,
         param_distributions=param_dist,
-        n_iter=30,
+        n_iter=20,
         scoring="roc_auc",
         cv=cv,
         verbose=2,

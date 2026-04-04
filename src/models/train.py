@@ -1,213 +1,225 @@
-from __future__ import annotations
+"""
+train.py
+Production-ready training pipeline
+"""
 
+import pandas as pd
+import numpy as np
+import joblib
 import json
 import os
-from pathlib import Path
-
-import joblib
 import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
-from imblearn.over_sampling import SMOTE
-from imblearn.pipeline import Pipeline
-from sklearn.ensemble import RandomForestClassifier
+
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import f1_score, precision_score, recall_score
-from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
 from xgboost import XGBClassifier
+from sklearn.metrics import precision_score, recall_score, f1_score
 
-# 1. Data
-from src.data.make_dataset import load_data
+from imblearn.pipeline import Pipeline
+from imblearn.over_sampling import SMOTE
 
-# 2. Features
-from src.features.build_features import build_features
+from src.models.evaluate import evaluate_model, plot_roc_curves, plot_pr_curves
+from src.models.hyperparameter_tuning import tune_xgboost
+from src.models.shap_evaluate import run_shap_analysis
 from src.features.preprocessing_pipeline import get_pipeline
 
-# 3. Models
-from src.models.evaluate import evaluate_model, plot_pr_curves, plot_roc_curves
-from src.models.hyperparameter_tuning import tune_xgboost
-
-# 4. Analytics
-from src.analytics.shap_analysis import run_shap_analysis
-
-try:
-    from dotenv import load_dotenv
-except ImportError:  # pragma: no cover
-    load_dotenv = None
+# Import config
+from src.config import (
+    TRAIN_PATH, TEST_PATH, MODEL_PATH, PREPROCESSOR_PATH,
+    FIG_DIR, MODEL_DIR, REPORT_DIR,
+    DEBUG, DEBUG_SAMPLE_SIZE
+)
 
 
-BASE_DIR = Path(__file__).resolve().parents[2]
-if load_dotenv is not None:
-    load_dotenv(BASE_DIR / ".env")
-
-DATA_PATH = BASE_DIR / os.getenv("DATA_PATH", "data/raw/telecom_churn.csv")
-MODEL_PATH = BASE_DIR / os.getenv("MODEL_PATH", "models/best_model.pkl")
-FIG_DIR = BASE_DIR / "reports" / "figures"
-MODEL_DIR = BASE_DIR / "models"
-REPORT_DIR = BASE_DIR / "reports"
-
-for directory in (FIG_DIR, MODEL_DIR, REPORT_DIR):
-    directory.mkdir(parents=True, exist_ok=True)
-
-
-def build_training_pipeline(preprocessor, model):
-    return Pipeline(
-        [
-            ("preprocessor", preprocessor),
-            ("smote", SMOTE(sampling_strategy=0.5, random_state=42)),
-            ("classifier", model),
-        ]
-    )
-
-
-def load_training_data():
+def load_data():
     print("Loading data...")
-    df = load_data(DATA_PATH)
-
-    if "Churn" not in df.columns:
-        raise KeyError("Target column 'Churn' is missing from input data.")
-
-    X = df.drop(columns=["Churn"], errors="ignore")
-    y = df["Churn"].map({"Yes": 1, "No": 0})
-
-    if y.isna().any():
-        raise ValueError("Churn column must contain only 'Yes' and 'No'.")
-
-    return train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)
+    train = pd.read_csv(TRAIN_PATH)
+    test = pd.read_csv(TEST_PATH)
+    return train, test
 
 
-def run_threshold_analysis(best_model, X_test, y_test) -> None:
-    print("Running threshold analysis...")
-    probs = best_model.predict_proba(X_test)[:, 1]
+def preprocess_inputs(train, test):
+    print("Preparing inputs...")
 
-    thresholds = np.arange(0.10, 0.90, 0.05)
-    precision_list = []
-    recall_list = []
-    f1_list = []
+    X_train = train.drop("Churn", axis=1)
+    y_train = train["Churn"].map({"Yes": 1, "No": 0})
 
-    for threshold in thresholds:
-        preds = (probs >= threshold).astype(int)
-        precision_list.append(precision_score(y_test, preds))
-        recall_list.append(recall_score(y_test, preds))
-        f1_list.append(f1_score(y_test, preds))
+    X_test = test.drop("Churn", axis=1)
+    y_test = test["Churn"].map({"Yes": 1, "No": 0})
 
-    best_idx = int(np.argmax(f1_list))
-    best_threshold = float(thresholds[best_idx])
+    # Drop problematic columns (IMPORTANT FIX)
+    drop_cols = ["signup_date"]
+    X_train = X_train.drop(columns=drop_cols, errors="ignore")
+    X_test = X_test.drop(columns=drop_cols, errors="ignore")
 
-    print(f"Optimal threshold: {best_threshold:.2f}")
-    print(f"Precision: {precision_list[best_idx]:.3f}")
-    print(f"Recall: {recall_list[best_idx]:.3f}")
-    print(f"F1 Score: {f1_list[best_idx]:.3f}")
-
-    plt.figure(figsize=(8, 5))
-    plt.plot(thresholds, precision_list, label="Precision")
-    plt.plot(thresholds, recall_list, label="Recall")
-    plt.plot(thresholds, f1_list, label="F1 Score")
-    plt.xlabel("Threshold")
-    plt.ylabel("Score")
-    plt.title("Threshold Optimization")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(FIG_DIR / "threshold_analysis.png", dpi=150)
-    plt.close()
-
-
-def main() -> None:
-    X_train, X_test, y_train, y_test = load_training_data()
-
-    # Drop raw date column before training to avoid expensive downstream handling.
-    X_train = X_train.drop(columns=["signup_date"], errors="ignore")
-    X_test = X_test.drop(columns=["signup_date"], errors="ignore")
-
-    debug_sample_size = int(os.getenv("DEBUG_SAMPLE_SIZE", "5000"))
-    if debug_sample_size > 0 and len(X_train) > debug_sample_size:
-        X_train = X_train.sample(debug_sample_size, random_state=42)
+    # Debug mode
+    if DEBUG:
+        print(f"Debug mode ON ({DEBUG_SAMPLE_SIZE} samples)")
+        X_train = X_train.sample(DEBUG_SAMPLE_SIZE, random_state=42)
         y_train = y_train.loc[X_train.index]
-        print(f"Debug mode: training on {len(X_train)} sampled rows.")
 
-    X_train = build_features(X_train)
-    X_test = build_features(X_test)
+    return X_train, X_test, y_train, y_test
 
+
+def load_preprocessor(X_train):
+    if PREPROCESSOR_PATH.exists():
+        print("Loading preprocessing pipeline...")
+        return joblib.load(PREPROCESSOR_PATH)
+
+    print("Preprocessing pipeline not found. Building a new one...")
     use_woe = os.getenv("USE_WOE", "0") == "1"
+
     numeric_features = X_train.select_dtypes(include=["number"]).columns.tolist()
     categorical_features = X_train.select_dtypes(include=["object", "category", "bool"]).columns.tolist()
     preprocessor = get_pipeline(numeric_features, categorical_features, use_woe=use_woe)
 
+    joblib.dump(preprocessor, PREPROCESSOR_PATH)
+    print(f"Saved new preprocessing pipeline to: {PREPROCESSOR_PATH}")
+    return preprocessor
+
+
+def build_pipeline(preprocessor, model):
+    return Pipeline([
+        ("preprocessor", preprocessor),
+        ("smote", SMOTE(sampling_strategy=0.5, random_state=42)),
+        ("classifier", model)
+    ])
+
+
+def train_baseline_models(preprocessor, X_train, y_train, X_test, y_test):
+    print("\nTraining baseline models...")
+
     models = {
         "Logistic Regression": LogisticRegression(max_iter=1000, random_state=42),
         "Random Forest": RandomForestClassifier(n_estimators=100, n_jobs=-1, random_state=42),
-        "XGBoost": XGBClassifier(eval_metric="logloss", random_state=42),
+        "XGBoost": XGBClassifier(eval_metric="logloss", random_state=42)
     }
 
     results = {}
     trained_models = {}
 
-    print("Training baseline models...")
-    for name, estimator in models.items():
-        print(f"Training {name}...")
-        pipeline = build_training_pipeline(preprocessor, estimator)
-        pipeline.fit(X_train, y_train)
+    for name, model in models.items():
+        print(f"\nTraining {name}...")
 
-        metrics, _ = evaluate_model(name, pipeline, X_test, y_test, FIG_DIR)
+        pipe = build_pipeline(preprocessor, model)
+        pipe.fit(X_train, y_train)
+
+        metrics, _ = evaluate_model(name, pipe, X_test, y_test, FIG_DIR)
         results[name] = metrics
-        trained_models[name] = pipeline
+        trained_models[name] = pipe
 
-        model_filename = name.replace(" ", "_").lower() + ".pkl"
-        joblib.dump(pipeline, MODEL_DIR / model_filename)
+        joblib.dump(pipe, MODEL_DIR / f"{name.replace(' ', '_').lower()}.pkl")
 
-    print("Generating ROC and PR curves...")
-    plot_roc_curves(
-        {name: (trained_models[name], X_test) for name in trained_models},
-        y_test,
-        FIG_DIR / "06_roc_curves.png",
-    )
-    plot_pr_curves(
-        {name: (trained_models[name], X_test) for name in trained_models},
-        y_test,
-        FIG_DIR / "07_pr_curves.png",
-    )
+    return results, trained_models
 
-    print("Tuning XGBoost...")
-    xgb_pipe = build_training_pipeline(
+
+def run_hypertuning(preprocessor, X_train, y_train, X_test, y_test, results):
+    print("\nRunning XGBoost hyperparameter tuning...")
+
+    xgb_pipe = build_pipeline(
         preprocessor,
-        XGBClassifier(eval_metric="logloss", random_state=42),
+        XGBClassifier(eval_metric="logloss", random_state=42)
     )
+
     search = tune_xgboost(xgb_pipe, X_train, y_train)
     best_model = search.best_estimator_
 
-    print("Best Parameters:")
-    print(search.best_params_)
-    print(f"Best CV Score: {search.best_score_}")
+    print("Best Params:", search.best_params_)
+    print("Best Score:", search.best_score_)
 
-    with (REPORT_DIR / "hypertuning_results.json").open("w", encoding="utf-8") as f:
-        json.dump(
-            {
-                "best_params": search.best_params_,
-                "best_score": float(search.best_score_),
-            },
-            f,
-            indent=4,
-        )
+    # Save tuning results
+    with open(REPORT_DIR / "hypertuning_results.json", "w") as f:
+        json.dump({
+            "best_params": search.best_params_,
+            "best_score": float(search.best_score_)
+        }, f, indent=4)
 
+    # Evaluate tuned model
     metrics, _ = evaluate_model("XGBoost_Tuned", best_model, X_test, y_test, FIG_DIR)
     results["XGBoost_Tuned"] = metrics
 
     MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(best_model, MODEL_PATH)
 
+    return best_model, results
+
+
+def run_threshold_analysis(best_model, X_test, y_test):
+    print("\nRunning Threshold Analysis...")
+
+    probs = best_model.predict_proba(X_test)[:, 1]
+    thresholds = np.arange(0.1, 0.9, 0.05)
+
+    precision_list, recall_list, f1_list = [], [], []
+
+    for t in thresholds:
+        preds = (probs >= t).astype(int)
+        precision_list.append(precision_score(y_test, preds))
+        recall_list.append(recall_score(y_test, preds))
+        f1_list.append(f1_score(y_test, preds))
+
+    best_idx = np.argmax(f1_list)
+    best_threshold = thresholds[best_idx]
+
+    print(f"Best Threshold: {best_threshold:.2f}")
+
+    # Plot
+    plt.figure(figsize=(8,5))
+    plt.plot(thresholds, precision_list, label="Precision")
+    plt.plot(thresholds, recall_list, label="Recall")
+    plt.plot(thresholds, f1_list, label="F1")
+
+    plt.legend()
+    plt.title("Threshold Optimization")
+    plt.savefig(FIG_DIR / "threshold_analysis.png")
+    plt.close()
+
+
+def save_results(results):
+    print("\nSaving model comparison...")
+    df = pd.DataFrame(results).T
+    df.to_csv(REPORT_DIR / "model_comparison.csv")
+    print(df)
+
+
+def main():
+    train, test = load_data()
+
+    X_train, X_test, y_train, y_test = preprocess_inputs(train, test)
+
+    preprocessor = load_preprocessor(X_train)
+
+    results, trained_models = train_baseline_models(
+        preprocessor, X_train, y_train, X_test, y_test
+    )
+
+    plot_roc_curves(
+        {name: (trained_models[name], X_test) for name in trained_models},
+        y_test,
+        FIG_DIR / "06_roc_curves.png"
+    )
+
+    plot_pr_curves(
+        {name: (trained_models[name], X_test) for name in trained_models},
+        y_test,
+        FIG_DIR / "07_pr_curves.png"
+    )
+
+    best_model, results = run_hypertuning(
+        preprocessor, X_train, y_train, X_test, y_test, results
+    )
+
     run_threshold_analysis(best_model, X_test, y_test)
 
-    print("Running SHAP analysis...")
-    sample_size = min(500, len(X_test))
-    run_shap_analysis(best_model, X_test.sample(sample_size, random_state=42), FIG_DIR)
+    print("\nRunning SHAP analysis...")
+    run_shap_analysis(best_model, X_test.sample(500), FIG_DIR)
 
-    print("Creating model comparison table...")
-    df_results = pd.DataFrame(results).T
-    df_results.to_csv(REPORT_DIR / "model_comparison.csv")
-    print(df_results)
+    save_results(results)
 
-    print("Training completed successfully.")
+    print("\nTraining pipeline completed successfully!")
 
 
 if __name__ == "__main__":
     main()
+
+

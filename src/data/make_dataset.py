@@ -36,8 +36,7 @@ def clean_data(df: pd.DataFrame) -> pd.DataFrame:
 
     # Convert dates
     if "signup_date" in df.columns:
-        df["signup_date"] = pd.to_datetime(df["signup_date"], format="%Y-%m-%d")
-
+        df["days_since_signup"] = (pd.Timestamp.today() - df["signup_date"]).dt.days
     # Drop missing values
     missing_before = int(df.isnull().sum().sum())
     print(f"Missing values before cleaning: {missing_before}")
