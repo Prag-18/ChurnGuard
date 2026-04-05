@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from xml.parsers.expat import model
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -31,8 +32,12 @@ def run_shap_analysis(model, X_sample: pd.DataFrame, save_dir: str | Path) -> No
     output_dir.mkdir(parents=True, exist_ok=True)
 
     classifier, X_for_shap = _prepare_shap_inputs(model, X_sample)
-    explainer = shap.Explainer(classifier, X_for_shap)
-    shap_values = explainer(X_for_shap)
+    # Transform data using pipeline
+    X_transformed = model.named_steps["preprocessor"].transform(X_sample)
+
+    # Use TreeExplainer on classifier
+    explainer = shap.TreeExplainer(model.named_steps["classifier"])
+    shap_values = explainer.shap_values(X_transformed)
 
     shap.summary_plot(shap_values, X_for_shap, show=False)
     plt.tight_layout()
