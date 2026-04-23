@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "churnguard"
+version = "1.0.0"
+description = "Customer churn prediction — end-to-end ML system"
+requires-python = ">=3.11"
+
+[tool.setuptools.packages.find]
+include = ["src*"]
+
+[dependency-groups]
+
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=4.0.0",
+    "pylint>=3.1.0",
+]
+
+data = [
+    "pandas>=2.2.0",
+    "numpy>=2.1.0",
+    "openpyxl>=3.1.0",
+]
+
+features = [
+    "pandas>=2.2.0",
+    "scikit-learn>=1.4.0",
+]
+
+modeling = [
+    "scikit-learn>=1.4.0",
+    "xgboost>=2.1.0",
+    "lightgbm>=4.1.0",
+    "optuna>=3.6.0",
+]
+
+reporting = [
+    "matplotlib>=3.9.0",
+    "seaborn>=0.13.0",
+]
+
+interactive = [
+    "matplotlib>=3.9.0",
+    "seaborn>=0.13.0",
+    "plotly>=5.19.0",
+]
+
+server = [
+    "streamlit>=1.35.0",
+    "plotly>=5.19.0",
+    "shap>=0.45.0",
+]
+
+# Production dependencies (all dependencies needed to run the app)
+torch = ["scikit-learn>=1.4.0", "optuna>=3.6.0"]
+
+[project.optional-dependencies]
+torch = []
+dev = ["churnguard[data,features,modeling,reporting,interactive,server]"]
